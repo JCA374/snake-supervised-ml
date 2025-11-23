@@ -33,7 +33,7 @@ Step 2: Train Imitation Learning Model
    - Trains policy network on your gameplay
    - Model saved to: policy_imitation.pt
 
-Step 3: Run Automated Iterative Training
+Step 3: Run Automated Iterative Training (WITH VISUALIZATION!)
    python iterative_train.py
 
    - Automatically runs 10 iterations of MC improvement
@@ -41,6 +41,14 @@ Step 3: Run Automated Iterative Training
    - Tracks performance and saves history
    - Early stops if scores plateau
    - Model saved to: policy_mc.pt
+
+   NEW FEATURES:
+   - Evaluates human baseline performance
+   - Saves model for each iteration (training_logs/models/)
+   - Records best episode video for each iteration (training_logs/videos/)
+   - Generates training progress plots (training_logs/training_progress.png)
+   - Creates model comparison chart (training_logs/model_comparison.png)
+   - Produces comprehensive text report (training_logs/training_report.txt)
 
 Step 4: Watch Your Trained Agent
    python watch_agent.py data/policy_mc.pt
@@ -111,6 +119,8 @@ iterative_train.py:
   - train_epochs: epochs per iteration (default: 100)
   - mc_weight: MC data weight (default: 2.0)
   - eval_episodes: evaluation episodes (default: 50)
+  - record_videos: enable video recording (default: True)
+  - video_episodes: episodes to find best for video (default: 10)
 
 watch_agent.py:
   - policy_path: path to policy file
@@ -134,6 +144,44 @@ Run single test:
    python -m pytest tests/test_env.py::TestSnakeEnv::test_clone -v
 
 
+Visualization & Training Logs
+------------------------------
+After running iterative_train.py, you'll find:
+
+training_logs/
+  ├── training_progress.png       # Score improvement graph over iterations
+  ├── model_comparison.png        # Bar chart comparing all models
+  ├── training_report.txt         # Detailed text summary with stats
+  ├── training_history.npz        # Raw data for custom analysis
+  ├── models/                     # All saved models
+  │   ├── policy_iter_0_imitation.pt
+  │   ├── policy_iter_1_mc.pt
+  │   ├── policy_iter_2_mc.pt
+  │   └── ...
+  └── videos/                     # Best episode videos (GIF format)
+      ├── iter_0_imitation.gif
+      ├── iter_1_mc.gif
+      ├── iter_2_mc.gif
+      └── ...
+
+The progress plot shows:
+  - Mean score ± std dev over iterations
+  - Human baseline as reference line
+  - Annotations for initial and final performance
+
+The comparison chart shows:
+  - Mean and max scores side-by-side for each iteration
+  - Easy visual comparison of all models
+
+Videos capture:
+  - Best gameplay episode from each iteration
+  - 10 FPS GIF format (easy to view anywhere)
+  - Shows agent's gameplay strategy evolution
+
+Required packages for visualization:
+  pip install matplotlib imageio imageio[ffmpeg]
+
+
 Tips
 ----
 - Start with 10-20 human demo games
@@ -144,3 +192,6 @@ Tips
 - If agent gets stuck, add more human demos with different strategies
 - Use watch_agent.py to visually compare policies
 - Training history is saved to data/training_history.npz
+- Check training_logs/ folder for comprehensive visualization
+- Videos show gameplay evolution - watch them in sequence!
+- Compare specific models: python watch_agent.py training_logs/models/policy_iter_N_mc.pt

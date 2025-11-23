@@ -1,0 +1,81 @@
+Snake Supervised ML - Quick Usage Guide
+========================================
+
+Prerequisites
+-------------
+1. Create virtual environment:
+   python -m venv .venv
+
+2. Activate virtual environment:
+   Linux/Mac:  source .venv/bin/activate
+   Windows:    .venv\Scripts\activate
+
+3. Install dependencies:
+   pip install numpy torch pygame
+
+
+Workflow
+--------
+
+Step 1: Record Human Gameplay
+   python play_pygame.py
+
+   - Use arrow keys to control the snake
+   - Play through 5 episodes (configurable)
+   - Data saved to: human_demos.npz
+
+Step 2: Train Imitation Learning Model
+   python train_imitation.py
+
+   - Trains policy network on your gameplay
+   - Model saved to: policy_imitation.pt
+
+Step 3: Generate Monte Carlo Self-Play Data
+   python self_play.py
+
+   - Agent plays using Monte Carlo rollouts
+   - Generates improved gameplay data
+   - Data saved to: mc_demos.npz
+
+Step 4: Fine-tune with Combined Data
+   python train_mc.py
+
+   - Combines human demos + MC demos
+   - Fine-tunes policy network
+   - Model saved to: policy_mc.pt
+
+Step 5: Iterate
+   - Repeat steps 3-4 to improve performance
+   - Each iteration should improve the agent
+
+
+Configuration
+-------------
+Key parameters you can adjust:
+
+play_pygame.py:
+  - n_episodes: number of games to record
+  - FPS: game speed
+  - width/height: grid size
+
+train_imitation.py:
+  - epochs: training epochs
+  - batch_size: batch size
+  - lr: learning rate
+
+self_play.py:
+  - n_episodes: number of self-play games
+  - K: number of rollouts per action (5-20)
+  - H: horizon length per rollout (20-50)
+
+train_mc.py:
+  - mc_weight: how much to weight MC data vs human data
+
+
+Tips
+----
+- Start with 10-20 human demo games
+- Keep K and H small initially (K=5, H=20) for speed
+- Increase K and H gradually as policy improves
+- Watch scores improve across iterations
+- If agent gets stuck, add more human demos with different strategies

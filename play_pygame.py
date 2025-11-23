@@ -124,7 +124,7 @@ class SnakeGame:
 
         episode_recording = []
         running = True
-        move_delay = 100  # milliseconds between moves
+        move_delay = 300  # milliseconds between moves (300ms = slower, easier)
         last_move_time = pygame.time.get_ticks()
         pending_action = None
 

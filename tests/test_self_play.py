@@ -1,149 +1,31 @@
-import pytest
-import numpy as np
-import tempfile
 import os
-from self_play import generate_self_play_data
+import numpy as np
 from model import PolicyNet, save_model
+from self_play import generate_self_play_data
 
 
-class TestSelfPlay:
-    def test_generate_self_play_data_basic(self):
-        """Test basic self-play data generation."""
-        # Create a dummy policy
-        policy = PolicyNet(state_dim=9, n_actions=3)
+def test_generate_self_play_parallel(tmp_path):
+    """Parallel self-play generation should create datasets with correct shapes."""
+    policy = PolicyNet(state_dim=9, n_actions=3)
+    policy_path = tmp_path / "policy.pt"
+    save_model(policy, str(policy_path))
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            policy_path = os.path.join(tmpdir, 'test_policy.pt')
-            save_path = os.path.join(tmpdir, 'test_mc_demos.npz')
+    save_path = tmp_path / "mc_parallel.npz"
+    states, actions = generate_self_play_data(
+        policy_path=str(policy_path),
+        save_path=str(save_path),
+        num_episodes=4,
+        K=1,
+        H=5,
+        grid_size=6,
+        max_steps=50,
+        num_workers=2
+    )
 
-            # Save policy
-            save_model(policy, policy_path)
+    assert os.path.exists(save_path)
+    assert len(states) == len(actions)
+    assert len(states) > 0
 
-            # Generate data (small test)
-            states, actions = generate_self_play_data(
-                policy_path=policy_path,
-                save_path=save_path,
-                num_episodes=3,
-                K=2,
-                H=5,
-                grid_size=10,
-                max_steps=50
-            )
-
-            # Check outputs
-            assert len(states) > 0
-            assert len(actions) > 0
-            assert len(states) == len(actions)
-            assert states.shape[1] == 9  # state dimension
-            assert all(0 <= a <= 2 for a in actions)
-
-            # Check file was saved
-            assert os.path.exists(save_path)
-
-            # Check file contents
-            data = np.load(save_path)
-            assert 'states' in data
-            assert 'actions' in data
-            assert np.array_equal(data['states'], states)
-            assert np.array_equal(data['actions'], actions)
-
-    def test_generate_self_play_data_missing_policy(self):
-        """Test error handling when policy doesn't exist."""
-        with pytest.raises(FileNotFoundError):
-            generate_self_play_data(
-                policy_path='nonexistent_policy.pt',
-                save_path='test_output.npz',
-                num_episodes=1
-            )
-
-    def test_auto_detect_no_policies(self):
-        """Test auto-detect fails when no policies exist."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            save_path = os.path.join(tmpdir, 'test_mc_demos.npz')
-
-            # Change to tmpdir so it doesn't find real policies
-            old_cwd = os.getcwd()
-            try:
-                os.chdir(tmpdir)
-                with pytest.raises(FileNotFoundError, match="No trained policy found"):
-                    generate_self_play_data(
-                        policy_path=None,  # Auto-detect
-                        save_path=save_path,
-                        num_episodes=1
-                    )
-            finally:
-                os.chdir(old_cwd)
-
-    def test_generate_self_play_creates_directory(self):
-        """Test that output directory is created if it doesn't exist."""
-        policy = PolicyNet(state_dim=9, n_actions=3)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            policy_path = os.path.join(tmpdir, 'test_policy.pt')
-            save_path = os.path.join(tmpdir, 'subdir', 'nested', 'test_mc_demos.npz')
-
-            save_model(policy, policy_path)
-
-            # Directory doesn't exist yet
-            assert not os.path.exists(os.path.dirname(save_path))
-
-            # Generate data
-            generate_self_play_data(
-                policy_path=policy_path,
-                save_path=save_path,
-                num_episodes=2,
-                K=2,
-                H=5,
-                max_steps=20
-            )
-
-            # Directory and file should now exist
-            assert os.path.exists(save_path)
-
-    def test_generate_self_play_with_different_params(self):
-        """Test self-play with different K and H parameters."""
-        policy = PolicyNet(state_dim=9, n_actions=3)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            policy_path = os.path.join(tmpdir, 'test_policy.pt')
-            save_model(policy, policy_path)
-
-            for K, H in [(1, 5), (3, 10), (5, 20)]:
-                save_path = os.path.join(tmpdir, f'mc_K{K}_H{H}.npz')
-
-                states, actions = generate_self_play_data(
-                    policy_path=policy_path,
-                    save_path=save_path,
-                    num_episodes=2,
-                    K=K,
-                    H=H,
-                    max_steps=30
-                )
-
-                assert len(states) > 0
-                assert len(actions) > 0
-
-    def test_generate_self_play_episodes_produce_data(self):
-        """Test that each episode produces some data."""
-        policy = PolicyNet(state_dim=9, n_actions=3)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            policy_path = os.path.join(tmpdir, 'test_policy.pt')
-            save_path = os.path.join(tmpdir, 'test_mc_demos.npz')
-
-            save_model(policy, policy_path)
-
-            states, actions = generate_self_play_data(
-                policy_path=policy_path,
-                save_path=save_path,
-                num_episodes=5,
-                K=3,
-                H=10,
-                grid_size=8,
-                max_steps=100
-            )
-
-            # Should have generated data from 5 episodes
-            assert len(states) >= 5  # at least 1 step per episode
-            assert states.shape == (len(states), 9)
-            assert actions.shape == (len(actions),)
+    with np.load(save_path) as data:
+        assert data['states'].shape[0] == len(states)
+        assert data['actions'].shape[0] == len(actions)

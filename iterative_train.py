@@ -15,6 +15,7 @@ Run this after you have initial human demos and imitation policy.
 
 import os
 import shutil
+import time
 import numpy as np
 from self_play import generate_self_play_data
 from train_mc import train_mc
@@ -151,17 +152,21 @@ def select_best_starting_policy(eval_episodes):
 
 
 def iterative_training(
-    num_iterations=10,
+    num_iterations=50,
     mc_episodes=50,
     mc_K=5,
     mc_H=20,
     mc_K_step=1,
     mc_H_step=5,
     mc_adapt_threshold=0.1,
+    mc_adapt_patience=2,
     mc_reuse_iters=3,
+    mc_num_workers=1,
     train_epochs=100,
     mc_weight=2.0,
     eval_episodes=50,
+    fast_eval_episodes=10,
+    eval_full_every=5,
     record_videos=True,
     video_episodes=10
 ):
@@ -175,11 +180,15 @@ def iterative_training(
         mc_H: MC horizon (starting value)
         mc_K_step: increment applied to K when adaptation triggers
         mc_H_step: increment applied to H when adaptation triggers
-        mc_adapt_threshold: improvement threshold that triggers increased MC budgets
+        mc_adapt_threshold: improvement threshold that contributes to MC budget increase
+        mc_adapt_patience: number of consecutive low-improvement iterations before adapting MC budgets
         mc_reuse_iters: number of past MC datasets to retain for training (None for unlimited)
+        mc_num_workers: number of processes for parallel self-play generation
         train_epochs: training epochs per iteration
         mc_weight: weight for MC data vs human data
-        eval_episodes: episodes for evaluation
+        eval_episodes: episodes for full evaluation
+        fast_eval_episodes: episodes for lightweight evaluation each iteration
+        eval_full_every: frequency (iterations) to force full evaluation
         record_videos: whether to record best episode videos
         video_episodes: number of episodes to find best one for video
 
@@ -212,10 +221,12 @@ def iterative_training(
     print(f"  MC episodes/iter: {mc_episodes}")
     print(f"  MC rollouts (K): {mc_K} (step +{mc_K_step})")
     print(f"  MC horizon (H): {mc_H} (step +{mc_H_step})")
+    print(f"  MC adapt patience: {mc_adapt_patience} iteration(s)")
     print(f"  MC reuse: last {mc_reuse_iters} iterations" if mc_reuse_iters else "  MC reuse: unlimited")
+    print(f"  MC workers: {mc_num_workers}")
     print(f"  Training epochs: {train_epochs}")
     print(f"  MC weight: {mc_weight}x")
-    print(f"  Eval episodes: {eval_episodes}")
+    print(f"  Eval episodes: {eval_episodes} (fast eval {fast_eval_episodes}, full every {eval_full_every})")
     print(f"  Record videos: {record_videos and VIDEO_AVAILABLE}")
 
     # Evaluate human baseline
@@ -239,6 +250,7 @@ def iterative_training(
     current_mc_K = mc_K
     current_mc_H = mc_H
     human_data_in_mix = True
+    low_improve_streak = 0
 
     # Evaluate initial policy
     print("\n" + "-"*70)
@@ -298,6 +310,7 @@ def iterative_training(
 
         # Step 1: Generate MC self-play data
         print(f"\n[1/3] Generating MC self-play data (K={current_mc_K}, H={current_mc_H})...")
+        gen_start = time.perf_counter()
         try:
             iteration_mc_path = f'training_logs/mc_demos/iter_{iteration}.npz'
             states, actions = generate_self_play_data(
@@ -306,9 +319,10 @@ def iterative_training(
                 num_episodes=mc_episodes,
                 K=current_mc_K,
                 H=current_mc_H,
-                grid_size=10
+                grid_size=10,
+                num_workers=mc_num_workers
             )
-            print(f"✓ Generated {len(states)} transitions")
+            print(f"✓ Generated {len(states)} transitions in {time.perf_counter() - gen_start:.1f}s")
 
             # Track MC dataset for reuse
             mc_demo_paths.append(iteration_mc_path)
@@ -349,6 +363,7 @@ def iterative_training(
         if not human_data_in_mix:
             print("  Human data disabled (policy outperforms baseline). Using MC-only training.")
 
+        train_start = time.perf_counter()
         try:
             model = train_mc(
                 human_data_path='data/human_demos.npz',
@@ -361,15 +376,31 @@ def iterative_training(
                 lr=5e-4,
                 include_human_data=human_data_in_mix
             )
+            print(f"✓ Training completed in {time.perf_counter() - train_start:.1f}s")
         except Exception as e:
             print(f"❌ Error training: {e}")
             break
 
         # Step 3: Evaluate new policy
         print(f"\n[3/4] Evaluating improved policy...")
+        eval_start = time.perf_counter()
         try:
             policy = load_model('data/policy_mc.pt')
-            stats = evaluate_policy(policy, num_episodes=eval_episodes)
+            # Lightweight evaluation every iteration
+            stats_fast = evaluate_policy(policy, num_episodes=fast_eval_episodes)
+
+            run_full_eval = (
+                iteration % eval_full_every == 0 or
+                history['mean_score'][-1] is None or
+                stats_fast['mean_score'] - history['mean_score'][-1] >= mc_adapt_threshold
+            )
+
+            if run_full_eval:
+                stats = evaluate_policy(policy, num_episodes=eval_episodes)
+                print(f"  ✓ Full evaluation run ({time.perf_counter() - eval_start:.1f}s)")
+            else:
+                stats = stats_fast
+                print(f"  ✓ Using fast evaluation stats ({time.perf_counter() - eval_start:.1f}s)")
 
             print(f"\nIteration {iteration} Results:")
             print(f"  Mean Score: {stats['mean_score']:.2f} ± {stats['std_score']:.2f}")
@@ -406,10 +437,19 @@ def iterative_training(
             if os.path.exists(backup_path):
                 os.remove(backup_path)
             # Adapt MC parameters if we're not seeing sufficient improvement
-            if improvement <= mc_adapt_threshold and iteration < num_iterations:
-                current_mc_K += mc_K_step
-                current_mc_H += mc_H_step
-                print(f"  Adaptive MC: increasing K to {current_mc_K}, H to {current_mc_H}")
+            if improvement <= mc_adapt_threshold:
+                low_improve_streak += 1
+                if low_improve_streak >= mc_adapt_patience and iteration < num_iterations:
+                    current_mc_K += mc_K_step
+                    current_mc_H += mc_H_step
+                    low_improve_streak = 0
+                    print(f"  Adaptive MC: increasing K to {current_mc_K}, H to {current_mc_H}")
+                else:
+                    remaining = mc_adapt_patience - low_improve_streak
+                    print(f"  Low improvement streak: {low_improve_streak}/{mc_adapt_patience} "
+                          f"(need {remaining} more iteration(s) to adapt)")
+            else:
+                low_improve_streak = 0
 
         except Exception as e:
             print(f"❌ Error evaluating: {e}")

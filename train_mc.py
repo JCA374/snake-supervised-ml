@@ -33,7 +33,8 @@ def train_mc(
     epochs=100,
     batch_size=32,
     lr=5e-4,
-    val_split=0.2
+    val_split=0.2,
+    include_human_data=True
 ):
     """
     Train policy on combined human + MC data.
@@ -48,19 +49,25 @@ def train_mc(
         batch_size: batch size
         lr: learning rate
         val_split: fraction of data for validation
+        include_human_data: whether to mix in human demonstrations
     """
     print(f"\n=== Monte Carlo Policy Training ===")
 
     # Load human data
-    if os.path.exists(human_data_path):
-        human_data = np.load(human_data_path)
-        human_states = human_data['states']
-        human_actions = human_data['actions']
-        print(f"Loaded {len(human_states)} human transitions")
+    if include_human_data:
+        if os.path.exists(human_data_path):
+            human_data = np.load(human_data_path)
+            human_states = human_data['states']
+            human_actions = human_data['actions']
+            print(f"Loaded {len(human_states)} human transitions")
+        else:
+            human_states = np.array([])
+            human_actions = np.array([])
+            print("No human data found")
     else:
         human_states = np.array([])
         human_actions = np.array([])
-        print("No human data found")
+        print("Skipping human data (MC-focused training)")
 
     # Load MC data
     if not os.path.exists(mc_data_path):

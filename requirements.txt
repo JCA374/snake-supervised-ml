@@ -1,7 +1,12 @@
-numpy
-torch
-pygame
-pytest
-matplotlib
-imageio
-imageio[ffmpeg]
+# Core dependencies
+numpy>=1.24.0
+torch>=2.0.0
+pygame>=2.5.0
+
+# Testing
+pytest>=7.0.0
+
+# Visualization (for iterative_train.py)
+matplotlib>=3.7.0
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.9

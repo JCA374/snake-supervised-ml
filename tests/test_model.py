@@ -64,6 +64,18 @@ class TestPolicyNet:
 
         assert action1 == action2
 
+    def test_get_action_probs_batch_matches_single(self):
+        """Batch probability helper should match single-state queries."""
+        model = PolicyNet(state_dim=9, n_actions=3)
+        states = np.random.randn(4, 9).astype(np.float32)
+
+        batch_probs = model.get_action_probs_batch(states)
+        assert batch_probs.shape == (4, 3)
+
+        for idx, state in enumerate(states):
+            single_probs = model.get_probs(state)
+            assert np.allclose(batch_probs[idx], single_probs)
+
     def test_get_probs(self):
         """Test probability output."""
         model = PolicyNet(state_dim=9, n_actions=3)

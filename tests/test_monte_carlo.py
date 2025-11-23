@@ -154,3 +154,98 @@ class TestMonteCarlo:
         # Going straight should have the worst value (hits wall)
         # This is probabilistic and may not always hold for untrained policy
         assert action in [0, 1, 2]  # Just verify it returns valid action
+
+
+class HorizonToyEnv:
+    """Minimal environment to reason about MC horizon/rollouts."""
+
+    def __init__(self, future_steps=4):
+        self.future_steps = future_steps
+        self.reset()
+
+    def reset(self):
+        self.steps = 0
+        self.done = False
+        return np.array([0.0], dtype=np.float32)
+
+    def clone(self):
+        clone = HorizonToyEnv(self.future_steps)
+        clone.steps = self.steps
+        clone.done = self.done
+        return clone
+
+    def step(self, action):
+        if self.done:
+            raise ValueError("Episode finished")
+
+        self.steps += 1
+        reward = 0.0
+        done = False
+
+        if action == 0:
+            reward = 5.0 if self.steps == 1 else 0.0
+            done = True
+        elif action == 1:
+            reward = 0.0 if self.steps == 1 else 2.0
+            done = self.steps >= self.future_steps
+        else:
+            reward = -1.0
+            done = True
+
+        self.done = done
+        state = np.array([self.steps], dtype=np.float32)
+        return state, reward, done, {}
+
+
+class AlwaysStraightPolicy:
+    """Policy stub that always selects action 1."""
+
+    def get_action(self, state, deterministic=False):
+        return 1
+
+
+class RecordingPolicy:
+    """Policy stub that records batch sizes for caching tests."""
+
+    def __init__(self):
+        self.batch_sizes = []
+
+    def get_action_probs_batch(self, states):
+        batch = np.asarray(states, dtype=np.float32)
+        self.batch_sizes.append(len(batch))
+        probs = np.zeros((len(batch), 3), dtype=np.float32)
+        if len(batch) > 0:
+            probs[:, 1] = 1.0  # always pick action 1
+        return probs
+
+
+def test_monte_carlo_horizon_changes_action_choice():
+    """
+    Larger horizons should allow MC to pick actions with delayed rewards.
+    """
+    env = HorizonToyEnv(future_steps=4)
+    env.reset()
+    policy = AlwaysStraightPolicy()
+
+    short_action, short_values = monte_carlo_action(env, policy, K=1, H=1)
+    long_action, long_values = monte_carlo_action(env, policy, K=1, H=5)
+
+    assert short_action == 0  # immediate reward dominates with tiny horizon
+    assert long_action == 1   # longer horizon captures delayed 2-point gains
+    assert short_values[0] > short_values[1]
+    assert long_values[1] > long_values[0]
+
+
+def test_monte_carlo_caches_duplicate_states():
+    """
+    MC batching should collapse identical states into single policy calls.
+    """
+    env = HorizonToyEnv(future_steps=3)
+    env.reset()
+    policy = RecordingPolicy()
+
+    # All rollouts see the same state progression, so cache should keep batches at size 1
+    monte_carlo_action(env, policy, K=4, H=3, n_actions=3)
+
+    assert len(policy.batch_sizes) > 0
+    assert all(size == 1 for size in policy.batch_sizes)

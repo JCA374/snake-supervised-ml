@@ -24,33 +24,79 @@ def monte_carlo_action(env, policy, K=5, H=20, n_actions=3):
         action_values: dict mapping action -> average return
     """
     action_returns = {}
+    policy_cache = {}
+
+    def compute_probs_batch(states):
+        if hasattr(policy, 'get_action_probs_batch'):
+            return policy.get_action_probs_batch(states)
+        if hasattr(policy, 'get_probs'):
+            return np.stack([policy.get_probs(state) for state in states], axis=0)
+        # Fallback: use deterministic get_action and create one-hot probs
+        probs = []
+        n_actions_local = n_actions
+        for state in states:
+            action_idx = policy.get_action(state, deterministic=True)
+            one_hot = np.zeros(n_actions_local, dtype=np.float32)
+            one_hot[action_idx] = 1.0
+            probs.append(one_hot)
+        return np.array(probs)
+
+    def fetch_policy_probs(states):
+        """Return action probability arrays for each state, caching results."""
+        keys = []
+        missing = []
+        missing_set = set()
+        missing_states = []
+
+        for state in states:
+            normalized = np.asarray(state, dtype=np.float32)
+            key = normalized.tobytes()
+            keys.append((key, normalized))
+            if key not in policy_cache and key not in missing_set:
+                missing.append(key)
+                missing_set.add(key)
+                missing_states.append(normalized)
+
+        if missing_states:
+            batch = np.stack(missing_states, axis=0)
+            probs_batch = compute_probs_batch(batch)
+            for key, probs in zip(missing, probs_batch):
+                policy_cache[key] = probs
+
+        return [policy_cache[key] for key, _ in keys]
 
     for action in range(n_actions):
-        returns = []
+        rollouts = []
 
         for _ in range(K):
-            # Clone environment for this rollout
             env_copy = env.clone()
-
-            # Take the candidate action
             state, reward, done, _ = env_copy.step(action)
-            total_return = reward
-            steps = 0
+            rollouts.append({
+                'env': env_copy,
+                'state': state,
+                'done': done,
+                'return': reward
+            })
 
-            # Rollout using policy
-            while not done and steps < H:
-                # Get action from policy
-                action_rollout = policy.get_action(state, deterministic=False)
+        steps = 0
+        while steps < H:
+            active_indices = [i for i, r in enumerate(rollouts) if not r['done']]
+            if not active_indices:
+                break
 
-                # Take step
-                state, reward, done, _ = env_copy.step(action_rollout)
-                total_return += reward
-                steps += 1
+            states = [rollouts[i]['state'] for i in active_indices]
+            probs_list = fetch_policy_probs(states)
 
-            returns.append(total_return)
+            for idx, probs in zip(active_indices, probs_list):
+                action_rollout = np.random.choice(len(probs), p=probs)
+                state, reward, done, _ = rollouts[idx]['env'].step(action_rollout)
+                rollouts[idx]['return'] += reward
+                rollouts[idx]['state'] = state
+                rollouts[idx]['done'] = done
 
-        # Average return for this action
-        action_returns[action] = np.mean(returns)
+            steps += 1
+
+        action_returns[action] = np.mean([r['return'] for r in rollouts])
 
     # Choose best action
     best_action = max(action_returns, key=action_returns.get)

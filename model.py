@@ -32,6 +32,25 @@ class PolicyNet(nn.Module):
         """
         return self.net(x)
 
+    def _states_to_tensor(self, states):
+        """
+        Convert input states to a 2D float tensor.
+        """
+        tensor = torch.as_tensor(states, dtype=torch.float32)
+        if tensor.ndim == 1:
+            tensor = tensor.unsqueeze(0)
+        return tensor
+
+    def get_action_probs_batch(self, states):
+        """
+        Get action probabilities for a batch of states.
+        """
+        with torch.no_grad():
+            state_tensor = self._states_to_tensor(states)
+            logits = self.forward(state_tensor)
+            probs = torch.softmax(logits, dim=1)
+            return probs.cpu().numpy()
+
     def get_action(self, state, deterministic=False):
         """
         Get action from state.
@@ -43,17 +62,12 @@ class PolicyNet(nn.Module):
         Returns:
             action: int in {0, 1, 2}
         """
-        with torch.no_grad():
-            state_tensor = torch.FloatTensor(state).unsqueeze(0)
-            logits = self.forward(state_tensor)
-            probs = torch.softmax(logits, dim=1).squeeze(0)
+        probs = self.get_action_probs_batch(state)[0]
 
-            if deterministic:
-                action = torch.argmax(probs).item()
-            else:
-                action = torch.multinomial(probs, 1).item()
+        if deterministic:
+            return int(np.argmax(probs))
 
-            return action
+        return int(np.random.choice(len(probs), p=probs))
 
     def get_probs(self, state):
         """
@@ -65,16 +79,7 @@ class PolicyNet(nn.Module):
         Returns:
             probs: numpy array of shape (n_actions,)
         """
-        with torch.no_grad():
-            if isinstance(state, np.ndarray):
-                state = torch.FloatTensor(state).unsqueeze(0)
-            elif len(state.shape) == 1:
-                state = state.unsqueeze(0)
-
-            logits = self.forward(state)
-            probs = torch.softmax(logits, dim=1).squeeze(0)
-
-            return probs.numpy()
+        return self.get_action_probs_batch(state)[0]
 
 
 def save_model(model, path):

@@ -14,11 +14,12 @@ Run this after you have initial human demos and imitation policy.
 """
 
 import os
+import shutil
 import numpy as np
 from self_play import generate_self_play_data
 from train_mc import train_mc
 from monte_carlo import evaluate_policy
-from model import load_model, PolicyNet
+from model import load_model, save_model
 from visualize_training import (plot_training_progress, plot_comparison,
                                 create_training_report)
 
@@ -60,11 +61,104 @@ def evaluate_human_baseline(human_data_path='data/human_demos.npz',
     return estimated_score
 
 
+def _history_best_model_candidate():
+    """Return (path, label) for the best historical model if available."""
+    history_files = [
+        'training_logs/training_history.npz',
+        'data/training_history.npz'
+    ]
+
+    for history_path in history_files:
+        if not os.path.exists(history_path):
+            continue
+
+        try:
+            with np.load(history_path) as history:
+                if 'iteration' not in history or 'mean_score' not in history:
+                    continue
+                iterations = history['iteration']
+                mean_scores = history['mean_score']
+                if len(iterations) == 0:
+                    continue
+                best_idx = int(np.argmax(mean_scores))
+                best_iter = int(iterations[best_idx])
+        except Exception as exc:
+            print(f"⚠ Could not read training history at {history_path}: {exc}")
+            continue
+
+        if best_iter == 0:
+            candidate = 'training_logs/models/policy_iter_0_imitation.pt'
+            label = 'History best (imitation)'
+        else:
+            candidate = f'training_logs/models/policy_iter_{best_iter}_mc.pt'
+            label = f'History best (iteration {best_iter})'
+
+        if os.path.exists(candidate):
+            return candidate, label
+
+    return None, None
+
+
+def select_best_starting_policy(eval_episodes):
+    """Evaluate available checkpoints and return the best-performing policy."""
+    candidates = []
+    history_path, history_label = _history_best_model_candidate()
+    if history_path:
+        candidates.append((history_path, history_label))
+
+    if os.path.exists('data/policy_mc.pt'):
+        candidates.append(('data/policy_mc.pt', 'Current MC policy'))
+
+    if os.path.exists('data/policy_imitation.pt'):
+        candidates.append(('data/policy_imitation.pt', 'Imitation policy'))
+
+    # Deduplicate while preserving order
+    seen_paths = set()
+    unique_candidates = []
+    for path, label in candidates:
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        unique_candidates.append((path, label))
+
+    if not unique_candidates:
+        raise FileNotFoundError("No available policy checkpoints found.")
+
+    print("\nScanning available policies for best starting point...")
+    best_result = None
+    for path, label in unique_candidates:
+        try:
+            policy = load_model(path)
+            stats = evaluate_policy(policy, num_episodes=eval_episodes)
+            print(f"  Candidate {label}: mean score {stats['mean_score']:.2f} "
+                  f"(max {stats['max_score']}) from {path}")
+        except Exception as exc:
+            print(f"  ⚠ Skipping {path}: {exc}")
+            continue
+
+        if best_result is None or stats['mean_score'] > best_result['stats']['mean_score']:
+            best_result = {
+                'policy': policy,
+                'stats': stats,
+                'path': path,
+                'label': label
+            }
+
+    if best_result is None:
+        raise RuntimeError("Could not load any valid policy checkpoints.")
+
+    return best_result
+
+
 def iterative_training(
     num_iterations=10,
     mc_episodes=50,
     mc_K=5,
     mc_H=20,
+    mc_K_step=1,
+    mc_H_step=5,
+    mc_adapt_threshold=0.1,
+    mc_reuse_iters=3,
     train_epochs=100,
     mc_weight=2.0,
     eval_episodes=50,
@@ -78,7 +172,11 @@ def iterative_training(
         num_iterations: number of improvement iterations
         mc_episodes: episodes to generate per iteration
         mc_K: MC rollouts per action
-        mc_H: MC horizon
+        mc_H: MC horizon (starting value)
+        mc_K_step: increment applied to K when adaptation triggers
+        mc_H_step: increment applied to H when adaptation triggers
+        mc_adapt_threshold: improvement threshold that triggers increased MC budgets
+        mc_reuse_iters: number of past MC datasets to retain for training (None for unlimited)
         train_epochs: training epochs per iteration
         mc_weight: weight for MC data vs human data
         eval_episodes: episodes for evaluation
@@ -107,12 +205,14 @@ def iterative_training(
     os.makedirs('training_logs', exist_ok=True)
     os.makedirs('training_logs/models', exist_ok=True)
     os.makedirs('training_logs/videos', exist_ok=True)
+    os.makedirs('training_logs/mc_demos', exist_ok=True)
 
     print(f"\nConfiguration:")
     print(f"  Iterations: {num_iterations}")
     print(f"  MC episodes/iter: {mc_episodes}")
-    print(f"  MC rollouts (K): {mc_K}")
-    print(f"  MC horizon (H): {mc_H}")
+    print(f"  MC rollouts (K): {mc_K} (step +{mc_K_step})")
+    print(f"  MC horizon (H): {mc_H} (step +{mc_H_step})")
+    print(f"  MC reuse: last {mc_reuse_iters} iterations" if mc_reuse_iters else "  MC reuse: unlimited")
     print(f"  Training epochs: {train_epochs}")
     print(f"  MC weight: {mc_weight}x")
     print(f"  Eval episodes: {eval_episodes}")
@@ -135,30 +235,35 @@ def iterative_training(
 
     # Track video paths
     video_paths = {}
+    mc_demo_paths = []
+    current_mc_K = mc_K
+    current_mc_H = mc_H
+    human_data_in_mix = True
 
     # Evaluate initial policy
     print("\n" + "-"*70)
-    print("INITIAL EVALUATION (Iteration 0: Imitation)")
+    print("INITIAL EVALUATION (Iteration 0)")
     print("-"*70)
 
-    if os.path.exists('data/policy_mc.pt'):
-        print("Found existing MC policy, evaluating...")
-        initial_policy = load_model('data/policy_mc.pt')
-        policy_name = "MC (existing)"
-    else:
-        print("Evaluating imitation policy...")
-        initial_policy = load_model('data/policy_imitation.pt')
-        policy_name = "Imitation"
+    best_start = select_best_starting_policy(eval_episodes)
+    initial_policy = best_start['policy']
+    initial_stats = best_start['stats']
+    policy_name = best_start['label']
 
-    initial_stats = evaluate_policy(initial_policy, num_episodes=eval_episodes)
+    # Ensure canonical MC checkpoint matches the best policy
+    os.makedirs('data', exist_ok=True)
+    save_model(initial_policy, 'data/policy_mc.pt')
 
-    print(f"\n{policy_name} Policy Performance:")
+    print(f"\nStarting from {policy_name}:")
     print(f"  Mean Score: {initial_stats['mean_score']:.2f} ± {initial_stats['std_score']:.2f}")
     print(f"  Max Score:  {initial_stats['max_score']}")
     print(f"  Mean Steps: {initial_stats['mean_length']:.1f}")
 
+    if human_baseline is not None and initial_stats['mean_score'] >= human_baseline:
+        human_data_in_mix = False
+        print("  Human baseline beaten already; will focus on MC data going forward.")
+
     # Save initial model to training logs
-    from model import save_model
     save_model(initial_policy, 'training_logs/models/policy_iter_0_imitation.pt')
     print(f"✓ Model saved to training_logs/models/policy_iter_0_imitation.pt")
 
@@ -192,33 +297,69 @@ def iterative_training(
         print("="*60)
 
         # Step 1: Generate MC self-play data
-        print(f"\n[1/3] Generating MC self-play data...")
+        print(f"\n[1/3] Generating MC self-play data (K={current_mc_K}, H={current_mc_H})...")
         try:
+            iteration_mc_path = f'training_logs/mc_demos/iter_{iteration}.npz'
             states, actions = generate_self_play_data(
                 policy_path=None,  # Auto-detect best policy
-                save_path='data/mc_demos.npz',
+                save_path=iteration_mc_path,
                 num_episodes=mc_episodes,
-                K=mc_K,
-                H=mc_H,
+                K=current_mc_K,
+                H=current_mc_H,
                 grid_size=10
             )
             print(f"✓ Generated {len(states)} transitions")
+
+            # Track MC dataset for reuse
+            mc_demo_paths.append(iteration_mc_path)
+            if mc_reuse_iters and len(mc_demo_paths) > mc_reuse_iters:
+                oldest = mc_demo_paths.pop(0)
+                if os.path.exists(oldest):
+                    os.remove(oldest)
+
+            # Aggregate recent MC datasets
+            aggregate_states = []
+            aggregate_actions = []
+            for path in mc_demo_paths:
+                with np.load(path) as data:
+                    aggregate_states.append(data['states'])
+                    aggregate_actions.append(data['actions'])
+
+            combined_states = np.concatenate(aggregate_states, axis=0)
+            combined_actions = np.concatenate(aggregate_actions, axis=0)
+            aggregate_path = 'data/mc_demos.npz'
+            np.savez(aggregate_path, states=combined_states, actions=combined_actions)
+            print(f"✓ Aggregated {len(combined_states)} MC transitions "
+                  f"from {len(mc_demo_paths)} iteration(s)")
+
         except Exception as e:
             print(f"❌ Error generating data: {e}")
             break
 
         # Step 2: Train on combined data
         print(f"\n[2/3] Training on combined data...")
+        current_policy_path = 'data/policy_mc.pt' if os.path.exists('data/policy_mc.pt') else 'data/policy_imitation.pt'
+        backup_path = os.path.join('training_logs', 'models', '_prev_policy_backup.pt')
+        try:
+            shutil.copy(current_policy_path, backup_path)
+        except Exception as e:
+            print(f"❌ Error backing up current policy: {e}")
+            break
+
+        if not human_data_in_mix:
+            print("  Human data disabled (policy outperforms baseline). Using MC-only training.")
+
         try:
             model = train_mc(
                 human_data_path='data/human_demos.npz',
                 mc_data_path='data/mc_demos.npz',
-                init_policy_path='data/policy_mc.pt' if os.path.exists('data/policy_mc.pt') else 'data/policy_imitation.pt',
+                init_policy_path=current_policy_path,
                 save_path='data/policy_mc.pt',
                 mc_weight=mc_weight,
                 epochs=train_epochs,
                 batch_size=32,
-                lr=5e-4
+                lr=5e-4,
+                include_human_data=human_data_in_mix
             )
         except Exception as e:
             print(f"❌ Error training: {e}")
@@ -239,12 +380,36 @@ def iterative_training(
             improvement = stats['mean_score'] - history['mean_score'][-1]
             print(f"  Improvement: {improvement:+.2f}")
 
-            # Update history
+            if improvement < 0:
+                print("  Regression detected. Reverting to previous policy for next iteration.")
+                shutil.copy(backup_path, 'data/policy_mc.pt')
+                policy = load_model('data/policy_mc.pt')
+                stats = {
+                    'mean_score': history['mean_score'][-1],
+                    'std_score': history['std_score'][-1],
+                    'max_score': history['max_score'][-1],
+                    'mean_length': history['mean_length'][-1]
+                }
+                print(f"  Restored mean score: {stats['mean_score']:.2f}")
+            elif (human_baseline is not None and human_data_in_mix and
+                  stats['mean_score'] >= human_baseline):
+                human_data_in_mix = False
+                print("  Human baseline surpassed. Future iterations will focus on MC data only.")
+
+            # Update history with the policy we will keep
             history['iteration'].append(iteration)
             history['mean_score'].append(stats['mean_score'])
             history['std_score'].append(stats['std_score'])
             history['max_score'].append(stats['max_score'])
             history['mean_length'].append(stats['mean_length'])
+
+            if os.path.exists(backup_path):
+                os.remove(backup_path)
+            # Adapt MC parameters if we're not seeing sufficient improvement
+            if improvement <= mc_adapt_threshold and iteration < num_iterations:
+                current_mc_K += mc_K_step
+                current_mc_H += mc_H_step
+                print(f"  Adaptive MC: increasing K to {current_mc_K}, H to {current_mc_H}")
 
         except Exception as e:
             print(f"❌ Error evaluating: {e}")
@@ -293,7 +458,7 @@ def iterative_training(
     print("-" * 70)
 
     for i, iter_num in enumerate(history['iteration']):
-        model_name = "Imitation" if iter_num == 0 else f"MC Iter {iter_num}"
+        model_name = policy_name if iter_num == 0 else f"MC Iter {iter_num}"
         improvement = 0 if i == 0 else history['mean_score'][i] - history['mean_score'][i-1]
         mean_score_str = f"{history['mean_score'][i]:.2f} ± {history['std_score'][i]:.2f}"
         print(f"{iter_num:<6} {model_name:<15} {mean_score_str:<15} "

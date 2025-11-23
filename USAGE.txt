@@ -14,14 +14,17 @@ Prerequisites
    pip install numpy torch pygame
 
 
-Workflow
---------
+Workflow Options
+----------------
+
+OPTION A: Automated Training (Recommended)
+-------------------------------------------
 
 Step 1: Record Human Gameplay
    python play_pygame.py
 
    - Use arrow keys to control the snake
-   - Play through 5 episodes (configurable)
+   - Play through 10-20 games
    - Data saved to: human_demos.npz
 
 Step 2: Train Imitation Learning Model
@@ -30,10 +33,32 @@ Step 2: Train Imitation Learning Model
    - Trains policy network on your gameplay
    - Model saved to: policy_imitation.pt
 
+Step 3: Run Automated Iterative Training
+   python iterative_train.py
+
+   - Automatically runs 10 iterations of MC improvement
+   - Auto-detects best policy each iteration
+   - Tracks performance and saves history
+   - Early stops if scores plateau
+   - Model saved to: policy_mc.pt
+
+Step 4: Watch Your Trained Agent
+   python watch_agent.py data/policy_mc.pt
+
+   - Visual playback in Pygame window
+   - Press SPACE to restart, Q to quit
+
+
+OPTION B: Manual Step-by-Step
+------------------------------
+
+Step 1-2: Same as Option A
+
 Step 3: Generate Monte Carlo Self-Play Data
    python self_play.py
 
    - Agent plays using Monte Carlo rollouts
+   - Auto-detects best policy (prefers policy_mc.pt)
    - Generates improved gameplay data
    - Data saved to: mc_demos.npz
 
@@ -44,8 +69,12 @@ Step 4: Fine-tune with Combined Data
    - Fine-tunes policy network
    - Model saved to: policy_mc.pt
 
-Step 5: Iterate
-   - Repeat steps 3-4 to improve performance
+Step 5: Watch the Agent
+   python watch_agent.py data/policy_mc.pt
+
+Step 6: Iterate
+   - Repeat steps 3-5 to improve performance
+   - self_play.py will automatically use policy_mc.pt
    - Each iteration should improve the agent
 
 
@@ -54,28 +83,64 @@ Configuration
 Key parameters you can adjust:
 
 play_pygame.py:
-  - n_episodes: number of games to record
-  - FPS: game speed
-  - width/height: grid size
+  - num_games: number of games to record (default: 10)
+  - grid_size: game board size (default: 10)
+  - cell_size: pixel size of cells (default: 40)
 
 train_imitation.py:
-  - epochs: training epochs
-  - batch_size: batch size
-  - lr: learning rate
+  - epochs: training epochs (default: 100)
+  - batch_size: batch size (default: 32)
+  - lr: learning rate (default: 1e-3)
 
 self_play.py:
-  - n_episodes: number of self-play games
-  - K: number of rollouts per action (5-20)
-  - H: horizon length per rollout (20-50)
+  - policy_path: None for auto-detect or specific path
+  - num_episodes: number of self-play games (default: 50)
+  - K: number of rollouts per action (default: 5, range: 5-20)
+  - H: horizon length per rollout (default: 20, range: 10-50)
 
 train_mc.py:
-  - mc_weight: how much to weight MC data vs human data
+  - mc_weight: how much to weight MC data vs human (default: 2.0)
+  - epochs: training epochs (default: 100)
+  - lr: learning rate (default: 5e-4)
+
+iterative_train.py:
+  - num_iterations: number of training loops (default: 10)
+  - mc_episodes: episodes per iteration (default: 50)
+  - mc_K: rollouts per action (default: 5)
+  - mc_H: horizon length (default: 20)
+  - train_epochs: epochs per iteration (default: 100)
+  - mc_weight: MC data weight (default: 2.0)
+  - eval_episodes: evaluation episodes (default: 50)
+
+watch_agent.py:
+  - policy_path: path to policy file
+  - num_episodes: episodes to watch (default: 10)
+  - fps: playback speed (default: 10)
+
+
+Testing
+-------
+Run the full test suite (49 tests):
+   python -m pytest tests/ -v
+
+Run specific test file:
+   python -m pytest tests/test_env.py -v
+   python -m pytest tests/test_model.py -v
+   python -m pytest tests/test_monte_carlo.py -v
+   python -m pytest tests/test_self_play.py -v
+   python -m pytest tests/test_iterative_train.py -v
+
+Run single test:
+   python -m pytest tests/test_env.py::TestSnakeEnv::test_clone -v
 
 
 Tips
 ----
 - Start with 10-20 human demo games
+- Use automated training (iterative_train.py) for convenience
 - Keep K and H small initially (K=5, H=20) for speed
 - Increase K and H gradually as policy improves
 - Watch scores improve across iterations
 - If agent gets stuck, add more human demos with different strategies
+- Use watch_agent.py to visually compare policies
+- Training history is saved to data/training_history.npz

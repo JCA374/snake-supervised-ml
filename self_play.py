@@ -6,7 +6,7 @@ from monte_carlo import monte_carlo_action
 
 
 def generate_self_play_data(
-    policy_path='data/policy_imitation.pt',
+    policy_path=None,
     save_path='data/mc_demos.npz',
     num_episodes=50,
     K=5,
@@ -18,7 +18,7 @@ def generate_self_play_data(
     Generate self-play data using Monte Carlo action selection.
 
     Args:
-        policy_path: path to trained policy
+        policy_path: path to trained policy (if None, auto-detects best available)
         save_path: path to save MC demonstrations
         num_episodes: number of episodes to generate
         K: number of MC rollouts per action
@@ -29,6 +29,19 @@ def generate_self_play_data(
     Returns:
         states, actions: numpy arrays of generated data
     """
+    # Auto-detect best policy if not specified
+    if policy_path is None:
+        if os.path.exists('data/policy_mc.pt'):
+            policy_path = 'data/policy_mc.pt'
+            print("Auto-detected: Using MC-improved policy")
+        elif os.path.exists('data/policy_imitation.pt'):
+            policy_path = 'data/policy_imitation.pt'
+            print("Auto-detected: Using imitation policy")
+        else:
+            raise FileNotFoundError(
+                "No trained policy found. Run train_imitation.py first."
+            )
+
     # Load policy
     if not os.path.exists(policy_path):
         raise FileNotFoundError(f"Policy not found: {policy_path}")
@@ -93,7 +106,7 @@ def generate_self_play_data(
 
 if __name__ == '__main__':
     states, actions = generate_self_play_data(
-        policy_path='data/policy_imitation.pt',
+        policy_path=None,  # Auto-detect best policy
         save_path='data/mc_demos.npz',
         num_episodes=50,
         K=5,

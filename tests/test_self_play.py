@@ -56,6 +56,24 @@ class TestSelfPlay:
                 num_episodes=1
             )
 
+    def test_auto_detect_no_policies(self):
+        """Test auto-detect fails when no policies exist."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = os.path.join(tmpdir, 'test_mc_demos.npz')
+
+            # Change to tmpdir so it doesn't find real policies
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                with pytest.raises(FileNotFoundError, match="No trained policy found"):
+                    generate_self_play_data(
+                        policy_path=None,  # Auto-detect
+                        save_path=save_path,
+                        num_episodes=1
+                    )
+            finally:
+                os.chdir(old_cwd)
+
     def test_generate_self_play_creates_directory(self):
         """Test that output directory is created if it doesn't exist."""
         policy = PolicyNet(state_dim=9, n_actions=3)

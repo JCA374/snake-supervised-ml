@@ -13,11 +13,13 @@ ENV/
 env.bak/
 venv.bak/
 
-# PyTorch models and data
+# Training data (exclude)
 data/
-*.pt
-*.pth
 *.npz
+
+# PyTorch models (tracked - so you can share trained models)
+# *.pt
+# *.pth
 
 # IDE
 .vscode/

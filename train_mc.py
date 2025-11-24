@@ -34,7 +34,11 @@ def train_mc(
     batch_size=32,
     lr=5e-4,
     val_split=0.2,
-    include_human_data=True
+    include_human_data=True,
+    human_replay_fraction=0.0,
+    early_stop_patience=15,
+    lr_decay=0.5,
+    min_lr=1e-5
 ):
     """
     Train policy on combined human + MC data.
@@ -50,21 +54,26 @@ def train_mc(
         lr: learning rate
         val_split: fraction of data for validation
         include_human_data: whether to mix in human demonstrations
+        human_replay_fraction: fraction of MC dataset size to sample from human demos even when include_human_data is False
+        early_stop_patience: epochs without validation improvement before triggering LR decay or early stop
+        lr_decay: multiplier applied to learning rate when patience is exceeded (<=1)
+        min_lr: minimum allowable learning rate before stopping
     """
     print(f"\n=== Monte Carlo Policy Training ===")
 
     # Load human data
-    if include_human_data:
+    human_states = np.array([])
+    human_actions = np.array([])
+
+    if include_human_data or human_replay_fraction > 0:
         if os.path.exists(human_data_path):
             human_data = np.load(human_data_path)
             human_states = human_data['states']
             human_actions = human_data['actions']
             print(f"Loaded {len(human_states)} human transitions")
         else:
-            human_states = np.array([])
-            human_actions = np.array([])
             print("No human data found")
-    else:
+    if not include_human_data and human_replay_fraction <= 0:
         human_states = np.array([])
         human_actions = np.array([])
         print("Skipping human data (MC-focused training)")
@@ -79,7 +88,17 @@ def train_mc(
     print(f"Loaded {len(mc_states)} MC transitions")
 
     # Combine datasets with weighting
-    if len(human_states) > 0:
+    replay_states = np.array([])
+    replay_actions = np.array([])
+
+    if not include_human_data and human_replay_fraction > 0 and len(human_states) > 0:
+        n_replay = max(1, int(len(mc_states) * human_replay_fraction))
+        indices = np.random.choice(len(human_states), size=n_replay, replace=len(human_states) < n_replay)
+        replay_states = human_states[indices]
+        replay_actions = human_actions[indices]
+        print(f"Injecting {n_replay} human transitions (~{human_replay_fraction*100:.1f}% of MC size)")
+
+    if len(human_states) > 0 and include_human_data:
         # Repeat MC samples according to weight
         mc_repeat = max(1, int(round(mc_weight)))
         mc_states_weighted = np.repeat(mc_states, mc_repeat, axis=0)
@@ -90,6 +109,11 @@ def train_mc(
 
         print(f"Combined dataset: {len(all_states)} transitions "
               f"(human: {len(human_states)}, MC weighted: {len(mc_states_weighted)})")
+    elif len(replay_states) > 0:
+        all_states = np.concatenate([replay_states, mc_states], axis=0)
+        all_actions = np.concatenate([replay_actions, mc_actions], axis=0)
+        print(f"Combined dataset: {len(all_states)} transitions "
+              f"(replay human: {len(replay_states)}, MC: {len(mc_states)})")
     else:
         all_states = mc_states
         all_actions = mc_actions
@@ -132,6 +156,7 @@ def train_mc(
     print(f"Epochs: {epochs}, Batch size: {batch_size}, LR: {lr}")
 
     best_val_acc = 0.0
+    epochs_no_improve = 0
 
     # Training loop
     for epoch in range(epochs):
@@ -190,8 +215,22 @@ def train_mc(
         # Save best model
         if val_acc > best_val_acc:
             best_val_acc = val_acc
+            epochs_no_improve = 0
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             save_model(model, save_path)
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= early_stop_patience:
+                current_lr = optimizer.param_groups[0]['lr']
+                new_lr = current_lr * lr_decay
+                if new_lr >= min_lr and lr_decay < 1.0:
+                    for group in optimizer.param_groups:
+                        group['lr'] = new_lr
+                    epochs_no_improve = 0
+                    print(f"Patience exceeded, reducing LR to {new_lr:.6f}")
+                else:
+                    print("Early stopping due to validation plateau.")
+                    break
 
     print(f"\n✓ Training complete!")
     print(f"✓ Best validation accuracy: {best_val_acc:.3f}")

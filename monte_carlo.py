@@ -3,6 +3,9 @@ import numpy as np
 from env import SnakeEnv
 from model import PolicyNet
 
+# Upper bound on reward per step (eating food grants +10)
+MAX_STEP_REWARD = 10.0
+
 
 def monte_carlo_action(env, policy, K=5, H=20, n_actions=3):
     """
@@ -65,6 +68,8 @@ def monte_carlo_action(env, policy, K=5, H=20, n_actions=3):
 
         return [policy_cache[key] for key, _ in keys]
 
+    best_action_value = None
+
     for action in range(n_actions):
         rollouts = []
 
@@ -93,10 +98,24 @@ def monte_carlo_action(env, policy, K=5, H=20, n_actions=3):
                 rollouts[idx]['return'] += reward
                 rollouts[idx]['state'] = state
                 rollouts[idx]['done'] = done
+                if (not rollouts[idx]['done'] and best_action_value is not None and
+                        rollouts[idx]['return'] + (H - steps - 1) * MAX_STEP_REWARD <= best_action_value):
+                    rollouts[idx]['done'] = True
 
             steps += 1
 
-        action_returns[action] = np.mean([r['return'] for r in rollouts])
+            if best_action_value is not None:
+                remaining = H - steps
+                optimistic_returns = [
+                    r['return'] + remaining * MAX_STEP_REWARD for r in rollouts
+                ]
+                if np.mean(optimistic_returns) <= best_action_value:
+                    break
+
+        returns = np.array([r['return'] for r in rollouts], dtype=np.float32)
+        action_returns[action] = float(np.mean(returns))
+        if best_action_value is None or action_returns[action] > best_action_value:
+            best_action_value = action_returns[action]
 
     # Choose best action
     best_action = max(action_returns, key=action_returns.get)

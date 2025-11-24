@@ -15,6 +15,7 @@ Run this after you have initial human demos and imitation policy.
 
 import os
 import shutil
+import tempfile
 import time
 import numpy as np
 from self_play import generate_self_play_data
@@ -151,6 +152,67 @@ def select_best_starting_policy(eval_episodes):
     return best_result
 
 
+def _aggregate_mc_demos(paths, save_path):
+    """Aggregate MC demo files using memmap to limit peak memory."""
+    if not paths:
+        raise ValueError("No MC demo paths provided for aggregation.")
+
+    # Determine shapes and dtypes
+    with np.load(paths[0], mmap_mode='r') as sample:
+        state_shape = sample['states'].shape[1:]
+        state_dtype = sample['states'].dtype
+        action_dtype = sample['actions'].dtype
+
+    total_transitions = 0
+    for path in paths:
+        with np.load(path, mmap_mode='r') as data:
+            total_transitions += data['states'].shape[0]
+
+    if total_transitions == 0:
+        np.savez(save_path, states=np.empty((0,) + state_shape, dtype=state_dtype),
+                 actions=np.empty((0,), dtype=action_dtype))
+        return 0
+
+    state_mem_fd, state_mem_path = tempfile.mkstemp(suffix='.mc_states')
+    action_mem_fd, action_mem_path = tempfile.mkstemp(suffix='.mc_actions')
+    os.close(state_mem_fd)
+    os.close(action_mem_fd)
+
+    states_mm = np.memmap(state_mem_path, dtype=state_dtype, mode='w+',
+                          shape=(total_transitions,) + state_shape)
+    actions_mm = np.memmap(action_mem_path, dtype=action_dtype, mode='w+',
+                           shape=(total_transitions,))
+
+    offset = 0
+    for path in paths:
+        with np.load(path, mmap_mode='r') as data:
+            chunk_len = data['states'].shape[0]
+            if chunk_len == 0:
+                continue
+            end = offset + chunk_len
+            states_mm[offset:end] = data['states']
+            actions_mm[offset:end] = data['actions']
+            offset = end
+
+    np.savez(save_path, states=states_mm, actions=actions_mm)
+    del states_mm
+    del actions_mm
+    os.remove(state_mem_path)
+    os.remove(action_mem_path)
+    return total_transitions
+
+
+def _select_grid_size(schedule, score):
+    """Pick grid size based on a sorted schedule of (grid, threshold)."""
+    selected = schedule[0][0]
+    for grid, threshold in schedule:
+        if score >= threshold:
+            selected = grid
+        else:
+            break
+    return selected
+
+
 def iterative_training(
     num_iterations=50,
     mc_episodes=50,
@@ -162,6 +224,9 @@ def iterative_training(
     mc_adapt_patience=2,
     mc_reuse_iters=3,
     mc_num_workers=1,
+    human_replay_interval=3,
+    human_replay_fraction=0.05,
+    grid_schedule=None,
     train_epochs=100,
     mc_weight=2.0,
     eval_episodes=50,
@@ -184,6 +249,9 @@ def iterative_training(
         mc_adapt_patience: number of consecutive low-improvement iterations before adapting MC budgets
         mc_reuse_iters: number of past MC datasets to retain for training (None for unlimited)
         mc_num_workers: number of processes for parallel self-play generation
+        human_replay_interval: inject a small human demo batch every N iterations after MC-only switch (0 disables)
+        human_replay_fraction: fraction of MC dataset size to sample from human demos during injections
+        grid_schedule: ordered list of (grid_size, score_threshold) pairs for curriculum progression
         train_epochs: training epochs per iteration
         mc_weight: weight for MC data vs human data
         eval_episodes: episodes for full evaluation
@@ -210,6 +278,10 @@ def iterative_training(
         print("Run: python train_imitation.py")
         return None
 
+    if grid_schedule is None:
+        grid_schedule = [(10, 0.0)]
+    grid_schedule = sorted(grid_schedule, key=lambda item: item[1])
+
     # Create training logs directory
     os.makedirs('training_logs', exist_ok=True)
     os.makedirs('training_logs/models', exist_ok=True)
@@ -224,9 +296,12 @@ def iterative_training(
     print(f"  MC adapt patience: {mc_adapt_patience} iteration(s)")
     print(f"  MC reuse: last {mc_reuse_iters} iterations" if mc_reuse_iters else "  MC reuse: unlimited")
     print(f"  MC workers: {mc_num_workers}")
+    if human_replay_interval and human_replay_fraction > 0:
+        print(f"  Human replay: {human_replay_fraction*100:.1f}% every {human_replay_interval} iteration(s)")
     print(f"  Training epochs: {train_epochs}")
     print(f"  MC weight: {mc_weight}x")
     print(f"  Eval episodes: {eval_episodes} (fast eval {fast_eval_episodes}, full every {eval_full_every})")
+    print(f"  Grid schedule: {grid_schedule}")
     print(f"  Record videos: {record_videos and VIDEO_AVAILABLE}")
 
     # Evaluate human baseline
@@ -259,17 +334,25 @@ def iterative_training(
 
     best_start = select_best_starting_policy(eval_episodes)
     initial_policy = best_start['policy']
-    initial_stats = best_start['stats']
     policy_name = best_start['label']
 
     # Ensure canonical MC checkpoint matches the best policy
     os.makedirs('data', exist_ok=True)
     save_model(initial_policy, 'data/policy_mc.pt')
 
+    current_grid_size = grid_schedule[0][0]
+    initial_stats = evaluate_policy(
+        initial_policy,
+        num_episodes=eval_episodes,
+        grid_size=current_grid_size
+    )
+
     print(f"\nStarting from {policy_name}:")
     print(f"  Mean Score: {initial_stats['mean_score']:.2f} ± {initial_stats['std_score']:.2f}")
     print(f"  Max Score:  {initial_stats['max_score']}")
     print(f"  Mean Steps: {initial_stats['mean_length']:.1f}")
+
+    print(f"  Starting grid size: {current_grid_size}")
 
     if human_baseline is not None and initial_stats['mean_score'] >= human_baseline:
         human_data_in_mix = False
@@ -309,7 +392,7 @@ def iterative_training(
         print("="*60)
 
         # Step 1: Generate MC self-play data
-        print(f"\n[1/3] Generating MC self-play data (K={current_mc_K}, H={current_mc_H})...")
+        print(f"\n[1/3] Generating MC self-play data (grid={current_grid_size}, K={current_mc_K}, H={current_mc_H})...")
         gen_start = time.perf_counter()
         try:
             iteration_mc_path = f'training_logs/mc_demos/iter_{iteration}.npz'
@@ -331,19 +414,9 @@ def iterative_training(
                 if os.path.exists(oldest):
                     os.remove(oldest)
 
-            # Aggregate recent MC datasets
-            aggregate_states = []
-            aggregate_actions = []
-            for path in mc_demo_paths:
-                with np.load(path) as data:
-                    aggregate_states.append(data['states'])
-                    aggregate_actions.append(data['actions'])
-
-            combined_states = np.concatenate(aggregate_states, axis=0)
-            combined_actions = np.concatenate(aggregate_actions, axis=0)
             aggregate_path = 'data/mc_demos.npz'
-            np.savez(aggregate_path, states=combined_states, actions=combined_actions)
-            print(f"✓ Aggregated {len(combined_states)} MC transitions "
+            total_transitions = _aggregate_mc_demos(mc_demo_paths, aggregate_path)
+            print(f"✓ Aggregated {total_transitions} MC transitions "
                   f"from {len(mc_demo_paths)} iteration(s)")
 
         except Exception as e:
@@ -360,8 +433,13 @@ def iterative_training(
             print(f"❌ Error backing up current policy: {e}")
             break
 
+        replay_fraction = 0.0
         if not human_data_in_mix:
             print("  Human data disabled (policy outperforms baseline). Using MC-only training.")
+            if (human_replay_interval and human_replay_fraction > 0 and
+                    iteration % human_replay_interval == 0):
+                replay_fraction = human_replay_fraction
+                print(f"  Injecting {human_replay_fraction*100:.1f}% human demos this iteration.")
 
         train_start = time.perf_counter()
         try:
@@ -374,7 +452,8 @@ def iterative_training(
                 epochs=train_epochs,
                 batch_size=32,
                 lr=5e-4,
-                include_human_data=human_data_in_mix
+                include_human_data=human_data_in_mix,
+                human_replay_fraction=replay_fraction
             )
             print(f"✓ Training completed in {time.perf_counter() - train_start:.1f}s")
         except Exception as e:

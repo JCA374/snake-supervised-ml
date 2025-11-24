@@ -18,7 +18,6 @@ data/
 *.npz
 
 # Training logs (videos, plots, iteration models)
-training_logs/
 
 # PyTorch models (tracked - so you can share trained models)
 # *.pt

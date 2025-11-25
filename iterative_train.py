@@ -214,24 +214,25 @@ def _select_grid_size(schedule, score):
 
 
 def iterative_training(
-    num_iterations=50,
-    mc_episodes=50,
+    num_iterations=20,
+    mc_episodes=180,
     mc_K=6,
     mc_H=30,
-    mc_K_step=1,
-    mc_H_step=5,
-    mc_adapt_threshold=0.1,
-    mc_adapt_patience=2,
-    mc_reuse_iters=3,
-    mc_num_workers=1,
-    human_replay_interval=3,
-    human_replay_fraction=0.05,
+    mc_K_step=2,
+    mc_H_step=10,
+    mc_adapt_threshold=0.05,
+    mc_adapt_patience=1,
+    mc_reuse_iters=None,
+    mc_num_workers=4,
+    human_replay_interval=2,
+    human_replay_fraction=0.1,
+    keep_human_data=True,
     grid_schedule=None,
-    train_epochs=100,
-    mc_weight=2.0,
+    train_epochs=150,
+    mc_weight=3.0,
     eval_episodes=50,
     fast_eval_episodes=10,
-    eval_full_every=5,
+    eval_full_every=2,
     record_videos=True,
     video_episodes=10
 ):
@@ -251,6 +252,7 @@ def iterative_training(
         mc_num_workers: number of processes for parallel self-play generation
         human_replay_interval: inject a small human demo batch every N iterations after MC-only switch (0 disables)
         human_replay_fraction: fraction of MC dataset size to sample from human demos during injections
+        keep_human_data: if True, always mix in human data instead of disabling it after beating the baseline
         grid_schedule: ordered list of (grid_size, score_threshold) pairs for curriculum progression
         train_epochs: training epochs per iteration
         mc_weight: weight for MC data vs human data
@@ -354,7 +356,8 @@ def iterative_training(
 
     print(f"  Starting grid size: {current_grid_size}")
 
-    if human_baseline is not None and initial_stats['mean_score'] >= human_baseline:
+    if (not keep_human_data and human_baseline is not None and
+            initial_stats['mean_score'] >= human_baseline):
         human_data_in_mix = False
         print("  Human baseline beaten already; will focus on MC data going forward.")
 
@@ -501,7 +504,7 @@ def iterative_training(
                     'mean_length': history['mean_length'][-1]
                 }
                 print(f"  Restored mean score: {stats['mean_score']:.2f}")
-            elif (human_baseline is not None and human_data_in_mix and
+            elif (not keep_human_data and human_baseline is not None and human_data_in_mix and
                   stats['mean_score'] >= human_baseline):
                 human_data_in_mix = False
                 print("  Human baseline surpassed. Future iterations will focus on MC data only.")
@@ -558,14 +561,6 @@ def iterative_training(
                     print(f"✓ Video recorded: {video_result['video_path']}")
             except Exception as e:
                 print(f"⚠ Video recording failed: {e}")
-
-        # Check for convergence
-        if iteration > 2:
-            recent_scores = history['mean_score'][-3:]
-            if max(recent_scores) - min(recent_scores) < 0.1:
-                print(f"\n⚠ Converged! Scores plateaued (range < 0.1)")
-                print(f"Stopping early at iteration {iteration}")
-                break
 
     # Final summary
     print("\n" + "="*70)
@@ -669,13 +664,24 @@ if __name__ == '__main__':
     # - video_episodes: More episodes = better chance of finding best gameplay
 
     history = iterative_training(
-        num_iterations=10,
-        mc_episodes=50,
-        mc_K=5,
-        mc_H=20,
-        train_epochs=100,
-        mc_weight=2.0,
+        num_iterations=20,
+        mc_episodes=180,
+        mc_K=6,
+        mc_H=30,
+        mc_K_step=2,
+        mc_H_step=10,
+        mc_adapt_threshold=0.05,
+        mc_adapt_patience=1,
+        mc_reuse_iters=None,
+        mc_num_workers=4,
+        human_replay_interval=2,
+        human_replay_fraction=0.1,
+        keep_human_data=True,
+        train_epochs=150,
+        mc_weight=3.0,
         eval_episodes=50,
+        fast_eval_episodes=10,
+        eval_full_every=2,
         record_videos=True,
         video_episodes=10
     )

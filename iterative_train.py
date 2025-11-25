@@ -216,8 +216,8 @@ def _select_grid_size(schedule, score):
 def iterative_training(
     num_iterations=50,
     mc_episodes=50,
-    mc_K=5,
-    mc_H=20,
+    mc_K=6,
+    mc_H=30,
     mc_K_step=1,
     mc_H_step=5,
     mc_adapt_threshold=0.1,
